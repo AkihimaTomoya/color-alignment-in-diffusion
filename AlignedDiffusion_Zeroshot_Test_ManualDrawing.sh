@@ -5,7 +5,7 @@ CUDA_VISIBLE_DEVICES="0" python test.py \
   --dataset_name="jackyhate/text-to-image-2M" --train_split_only \
   --cache_dir="./cache" \
   --resolution=512 \
-  --output_dir="WithProjection-WithShuffling-Finetuning-t2i_2m-512" \
+  --output_dir="WithProjection-Zeroshot-t2i_2m-512" \
   --eval_batch_size=4 \
   --logger="wandb" \
   --resume_from_checkpoint latest \
@@ -19,5 +19,4 @@ CUDA_VISIBLE_DEVICES="0" python test.py \
   --proportion_empty_prompts=0 \
   --projection_threshold=200 \
   --with_pred_sample_projection \
-  --with_shuffling \
   --test_on_manually_drawn_samples
