@@ -32,6 +32,47 @@ from pytorch3d.loss import chamfer_distance
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.28.0.dev0")
+
+def load_local_dataset(dataset_path, train_split_only=False):
+    """
+    Load local dataset created by our conversion script
+    """
+    from datasets import load_from_disk
+    
+    try:
+        # Load dataset từ disk
+        dataset_dict = load_from_disk(dataset_path)
+        
+        if train_split_only:
+            # Nếu chỉ có train split, chia thành train/test
+            full_train = dataset_dict['train']
+            total_size = len(full_train)
+            
+            if total_size < 2:
+                # Nếu quá ít data, dùng toàn bộ cho cả train và test
+                return full_train, full_train
+            
+            # Chia 90/10
+            train_size = int(total_size * 0.9)
+            train_indices = list(range(train_size))
+            test_indices = list(range(train_size, total_size))
+            
+            if len(test_indices) == 0:
+                test_indices = [train_size - 1]  # Ít nhất 1 sample cho test
+            
+            train_dataset = full_train.select(train_indices)
+            test_dataset = full_train.select(test_indices)
+        else:
+            # Sử dụng split có sẵn
+            train_dataset = dataset_dict['train']
+            test_dataset = dataset_dict.get('test', dataset_dict['train'])
+        
+        return train_dataset, test_dataset
+        
+    except Exception as e:
+        logger.error(f"Error loading local dataset: {e}")
+        raise
+
 logger = get_logger(__name__, log_level="INFO")
 
 # If train on latent, use classifier free guidance and negative prompt for better image quality.
@@ -739,37 +780,41 @@ def main(args):
     # In distributed training, the load_dataset function guarantees that only one local process can concurrently
     # download the dataset.
     if args.dataset_name is not None:
-        if args.train_split_only:
-            if args.dataset_name == "jackyhate/text-to-image-2M":
-                dataset, test_dataset = load_dataset(
-                    args.dataset_name,
-                    args.dataset_config_name,
-                    cache_dir=args.cache_dir,
-                    split=['train[:60000]+train[80000:]', 'train[60000:80000]'],
-                    trust_remote_code=True,
-                    download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True)
-                )
+        # Kiểm tra xem có phải local dataset không
+        if os.path.exists(args.dataset_name) and os.path.isdir(args.dataset_name):
+            logger.info(f"Loading local dataset from {args.dataset_name}")
+            dataset, test_dataset = load_local_dataset(args.dataset_name, args.train_split_only)
+            logger.info(f"Local dataset loaded: train={len(dataset)}, test={len(test_dataset)}")
+        else:
+            # HuggingFace dataset - LOẠI BỎ trust_remote_code
+            logger.info(f"Loading HuggingFace dataset: {args.dataset_name}")
+            if args.train_split_only:
+                if args.dataset_name == "jackyhate/text-to-image-2M":
+                    dataset, test_dataset = load_dataset(
+                        args.dataset_name,
+                        args.dataset_config_name,
+                        cache_dir=args.cache_dir,
+                        split=['train[:60000]+train[80000:]', 'train[60000:80000]'],
+                        download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True) if args.cache_dir else None
+                    )
+                else:
+                    dataset, test_dataset = load_dataset(
+                        args.dataset_name,
+                        args.dataset_config_name,
+                        cache_dir=args.cache_dir,
+                        split=['train[:90%]', 'train[90%:]'],
+                        download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True) if args.cache_dir else None
+                    )
             else:
                 dataset, test_dataset = load_dataset(
                     args.dataset_name,
                     args.dataset_config_name,
                     cache_dir=args.cache_dir,
-                    split=['train[:90%]', 'train[90%:]'],
-                    trust_remote_code=True,
-                    download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True)
+                    split=['train', 'test'],
+                    download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True) if args.cache_dir else None
                 )
-        else:
-            dataset, test_dataset = load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                cache_dir=args.cache_dir,
-                split=['train', 'test'],
-                trust_remote_code=True,
-                download_config=DownloadConfig(cache_dir=args.cache_dir + "/downloads", resume_download=True)
-            )
     else:
-        raise Exception('Unimplemented dataset setting.')
-        # See more about loading custom images at
+        raise ValueError("You must specify a dataset name.")        # See more about loading custom images at
         # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
 
     if args.mixed_precision == "fp16":
@@ -801,13 +846,15 @@ def main(args):
     )
 
     def transform_images(examples):
+        # Xử lý images
         if "image" in examples:
             images = [augmentations(image.convert("RGB")) for image in examples["image"]]
         elif "jpg" in examples:
             images = [augmentations(image.convert("RGB")) for image in examples["jpg"]]
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"No image field found. Available fields: {list(examples.keys())}")
 
+        # Xử lý text prompts cho conditional model
         if args.model_type == 'UNet2DConditionModel':
             if "text" in examples:
                 texts = examples["text"]
@@ -816,9 +863,9 @@ def main(args):
             elif "prompt" in examples:
                 texts = examples["prompt"]
             elif "json" in examples:
-                texts = [json["prompt"] for json in examples["json"]]
+                texts = [json_item.get("prompt", "") if isinstance(json_item, dict) else str(json_item) for json_item in examples["json"]]
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f"No text field found for conditional model. Available fields: {list(examples.keys())}")
 
             return {"input": images, "input_prompt": texts}
         else:
