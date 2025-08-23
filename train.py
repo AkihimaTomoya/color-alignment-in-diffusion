@@ -160,7 +160,7 @@ class AlignedDDPMScheduler():
             latents_shuffled[bsi] = latents_original[bsi].reshape(self.latent_dim, -1)[:, shuffle_idx].reshape(self.latent_dim,
                                                                                                  self.raw_latent_length,
                                                                                                  self.raw_latent_length)
-        latents_shuffled = latents_shuffled.to(device=latents_original.device)
+        latents_shuffled = latents_shuffled.to(device=latents_original.device, dtype=latents_original.dtype)
 
         return {
             'latents_shuffled': latents_shuffled
@@ -177,7 +177,7 @@ class AlignedDDPMScheduler():
         self.cur_bsz = img_original.shape[0]
 
         # prepare diffusion matters
-        self.alphas_cumprod = self.alphas_cumprod.to(device=img_original.device)
+        self.alphas_cumprod = self.alphas_cumprod.to(device=img_original.device, dtype=img_original.dtype)
         alphas_cumprod = self.alphas_cumprod.to(dtype=img_original.dtype)
         timesteps = timesteps.to(img_original.device)
 
@@ -196,8 +196,8 @@ class AlignedDDPMScheduler():
             sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod * 0.
 
         # sample noise and do diffusion
-        rand_motion = torch.randn(self.cur_bsz, self.latent_dim, self.raw_latent_length, self.raw_latent_length).to(
-                device=img_original.device, dtype=img_original.dtype)
+        rand_motion = torch.randn(self.cur_bsz, self.latent_dim, self.raw_latent_length, self.raw_latent_length,
+                                 device=img_original.device, dtype=img_original.dtype)
 
         coor_original = img_original.clone().detach().to(device=img_original.device)
         coor_next = sqrt_alpha_prod * coor_original + sqrt_one_minus_alpha_prod * rand_motion
@@ -209,7 +209,11 @@ class AlignedDDPMScheduler():
             next_points = torch.swapaxes(coor_next_temp.reshape(self.cur_bsz, self.latent_dim, -1), 1, 2)
             ref_points = torch.swapaxes(img_ref.reshape(self.cur_bsz, self.latent_dim, -1), 1, 2).clone().detach().requires_grad_(True)
 
-            dist, _ = chamfer_distance(next_points, ref_points, batch_reduction="sum", point_reduction="sum", single_directional=True)
+            # Cast to float32 for chamfer distance
+            next_points_f32 = next_points.float()
+            ref_points_f32 = ref_points.float()
+            
+            dist, _ = chamfer_distance(next_points_f32, ref_points_f32, batch_reduction="sum", point_reduction="sum", single_directional=True)
             dist.backward()
 
             img_next = (coor_next_temp - 0.5 * coor_next_temp.grad).clone().detach()
@@ -253,8 +257,8 @@ class AlignedDDPMScheduler():
         t = timestep
         prev_t = self.previous_timestep(t)
 
-        self.alphas_cumprod = self.alphas_cumprod.to(device=img_original.device)
-        self.one = self.one.to(device=img_original.device)
+        self.alphas_cumprod = self.alphas_cumprod.to(device=img_original.device, dtype=img_original.dtype)
+        self.one = self.one.to(device=img_original.device, dtype=img_original.dtype)
 
         alpha_prod_t = self.alphas_cumprod[t]
         alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.one
@@ -266,8 +270,8 @@ class AlignedDDPMScheduler():
         # ddpm
         variance = 0
         if t > 0:
-            variance_noise = torch.randn(self.cur_bsz, self.latent_dim, self.raw_latent_length, self.raw_latent_length).to(
-                    device=img_original.device, dtype=img_original.dtype)
+            variance_noise = torch.randn(self.cur_bsz, self.latent_dim, self.raw_latent_length, self.raw_latent_length,
+                                       device=img_original.device, dtype=img_original.dtype)
             variance = ((self._get_variance(t) ** 0.5) * variance_noise).to(device=img_original.device)
 
         if self.prediction_type == "noise":
@@ -293,7 +297,11 @@ class AlignedDDPMScheduler():
             next_points = torch.swapaxes(coor_next_temp.reshape(self.cur_bsz, self.latent_dim, -1), 1, 2)
             ref_points = torch.swapaxes(img_ref.reshape(self.cur_bsz, self.latent_dim, -1), 1, 2).clone().detach().requires_grad_(True)
 
-            dist, _ = chamfer_distance(next_points, ref_points, batch_reduction="sum", point_reduction="sum", single_directional=True)
+            # Cast to float32 for chamfer distance
+            next_points_f32 = next_points.float()
+            ref_points_f32 = ref_points.float()
+            
+            dist, _ = chamfer_distance(next_points_f32, ref_points_f32, batch_reduction="sum", point_reduction="sum", single_directional=True)
             dist.backward()
 
             img_next = (coor_next_temp - 0.5 * coor_next_temp.grad).clone().detach()
@@ -1000,14 +1008,18 @@ def main(args):
                 clean_images_blurred = clean_images
 
             if vae:
-                clean_img_latents = vae.encode(clean_images).latent_dist.sample().to(device=clean_images.device)
+                # Ensure VAE inputs are in the correct dtype
+                clean_images_vae = clean_images.to(dtype=weight_dtype)
+                clean_images_blurred_vae = clean_images_blurred.to(dtype=weight_dtype)
+                
+                clean_img_latents = vae.encode(clean_images_vae).latent_dist.sample()
                 clean_img_latents = clean_img_latents * vae.config.scaling_factor
 
-                clean_img_blurred_latents = vae.encode(clean_images_blurred).latent_dist.sample().to(device=clean_images.device)
+                clean_img_blurred_latents = vae.encode(clean_images_blurred_vae).latent_dist.sample()
                 clean_img_blurred_latents = clean_img_blurred_latents * vae.config.scaling_factor
             else:
-                clean_img_latents = clean_images.clone().detach().to(device=clean_images.device)
-                clean_img_blurred_latents = clean_images_blurred.clone().detach().to(device=clean_images.device)
+                clean_img_latents = clean_images.clone().detach()
+                clean_img_blurred_latents = clean_images_blurred.clone().detach()
 
             clean_img_blurred_latents_shuffled = noise_scheduler.shuffle_latents(clean_img_blurred_latents)['latents_shuffled']
 
@@ -1024,9 +1036,11 @@ def main(args):
                     model_output = model(sample=temp_input,
                                          timestep=timesteps).sample
                 elif args.model_type == 'UNet2DConditionModel':
-                    encoder_hidden_states = text_encoder(
-                        tokenize_texts(batch["input_prompt"], args.proportion_empty_prompts).to(
-                            device=clean_images.device), return_dict=False)[0]
+                    # Ensure text encoder inputs have correct dtype
+                    with torch.no_grad():
+                        encoder_hidden_states = text_encoder(
+                            tokenize_texts(batch["input_prompt"], args.proportion_empty_prompts).to(
+                                device=clean_images.device), return_dict=False)[0]
 
                     temp_input = torch.cat((diffused_output['img_next'],
                                                            clean_img_blurred_latents_shuffled
@@ -1038,9 +1052,12 @@ def main(args):
                 else:
                     raise NotImplementedError
 
-                # Calculate loss
-                loss = F.mse_loss(model_output.float(),
-                                  diffused_output['target_output'])  # this could have different weights!
+                # Calculate loss - ensure both tensors have same dtype
+                target_output = diffused_output['target_output']
+                if model_output.dtype != target_output.dtype:
+                    model_output = model_output.to(dtype=target_output.dtype)
+                
+                loss = F.mse_loss(model_output.float(), target_output.float())
 
                 loss_dir["loss"] = loss.detach().item()
                 loss_dir["timesteps"] = torch.mean(timesteps.clone().float()).item()
@@ -1141,7 +1158,9 @@ def main(args):
                                 x_t = torch.randn(bsz_t,
                                                   noise_scheduler.latent_dim,
                                                   noise_scheduler.raw_latent_length,
-                                                  noise_scheduler.raw_latent_length).to(device=clean_images_t.device, dtype=clean_images_t.dtype)
+                                                  noise_scheduler.raw_latent_length,
+                                                  device=clean_images_t.device, 
+                                                  dtype=clean_images_t.dtype)
                                 c_t = x_t
 
                             diffused_images_to_save_STEP = \
@@ -1238,7 +1257,11 @@ def main(args):
                             pred_img_STEP_points = torch.swapaxes(pred_img_STEP.reshape(pred_img_STEP.shape[0], 3, -1),
                                                                   1, 2)
 
-                            rgb_chamfer_dist, _ = chamfer_distance(pred_img_STEP_points, clean_images_t_points, norm=1,
+                            # Cast to float32 for chamfer distance calculation
+                            clean_images_t_points_f32 = clean_images_t_points.float()
+                            pred_img_STEP_points_f32 = pred_img_STEP_points.float()
+
+                            rgb_chamfer_dist, _ = chamfer_distance(pred_img_STEP_points_f32, clean_images_t_points_f32, norm=1,
                                                                    batch_reduction=None, point_reduction=None)
 
                             rgb_chamfer_dist_l1_accuracy = torch.mean(rgb_chamfer_dist[0] / 2. * 255., dim=1).tolist()
