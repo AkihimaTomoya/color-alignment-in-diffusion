@@ -1,0 +1,15 @@
+#python 3.10
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+accelerate>=0.16.0
+diffusers>=0.28.0
+transformers>=4.20.0
+wandb
+datasets
+tqdm
+packaging
+bitsandbytes
+fvcore
+iopath
+pytorch3d
